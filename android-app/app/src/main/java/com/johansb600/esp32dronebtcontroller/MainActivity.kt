@@ -13,30 +13,11 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -45,13 +26,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.util.UUID
+import java.util.*
 
 class MainActivity : ComponentActivity() {
 
-    private val btPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { /* handled in UI state */ }
+    private val btPermissionsLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        // Opcional: puedes avisar si falló alguno
+    }
 
     private val enableBtLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -63,8 +46,13 @@ class MainActivity : ComponentActivity() {
         setContent {
             Esp32DroneBtControllerTheme {
                 MainScreen(
-                    onRequestBtPermission = {
-                        btPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                    onRequestBtPermissions = {
+                        btPermissionsLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.BLUETOOTH_CONNECT,
+                                Manifest.permission.BLUETOOTH_SCAN
+                            )
+                        )
                     },
                     onRequestEnableBluetooth = {
                         val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
@@ -77,32 +65,30 @@ class MainActivity : ComponentActivity() {
 }
 
 private const val TARGET_DEVICE_NAME = "ESP32_Puerta"
-
-// UUID estándar para SPP (Serial Port Profile)
 private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
 @OptIn(ExperimentalMaterial3Api::class)
-@RequiresApi(Build.VERSION_CODES.S)
-@androidx.compose.runtime.Composable
+@Composable
 private fun MainScreen(
-    onRequestBtPermission: () -> Unit,
+    onRequestBtPermissions: () -> Unit,
     onRequestEnableBluetooth: () -> Unit,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
     var isConnected by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("Desconectado") }
-
-    // Keep socket in state
     var socket by remember { mutableStateOf<BluetoothSocket?>(null) }
 
-    fun hasBtConnectPermission(): Boolean {
+    // Verifica ambos permisos
+    fun hasBtPermissions(): Boolean {
         return ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.BLUETOOTH_CONNECT
-        ) == PackageManager.PERMISSION_GRANTED
+            context, Manifest.permission.BLUETOOTH_CONNECT
+        ) == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.BLUETOOTH_SCAN
+                ) == PackageManager.PERMISSION_GRANTED
     }
 
     fun getAdapter(): BluetoothAdapter? {
@@ -111,55 +97,57 @@ private fun MainScreen(
     }
 
     suspend fun connect() {
-        val adapter = getAdapter()
-        if (adapter == null) {
-            status = "Bluetooth no disponible"
-            snackbarHostState.showSnackbar("Este dispositivo no tiene Bluetooth")
-            return
-        }
+        try {
+            val adapter = getAdapter()
+            if (adapter == null) {
+                status = "Bluetooth no disponible"
+                snackbarHostState.showSnackbar("Este dispositivo no tiene Bluetooth")
+                return
+            }
 
-        if (!hasBtConnectPermission()) {
-            onRequestBtPermission()
-            snackbarHostState.showSnackbar("Concede permiso de Bluetooth para conectar")
-            return
-        }
+            if (!hasBtPermissions()) {
+                onRequestBtPermissions()
+                snackbarHostState.showSnackbar("Concede permisos Bluetooth para conectar.")
+                return
+            }
 
-        if (!adapter.isEnabled) {
-            onRequestEnableBluetooth()
-            snackbarHostState.showSnackbar("Activa Bluetooth para conectar")
-            return
-        }
+            if (!adapter.isEnabled) {
+                onRequestEnableBluetooth()
+                snackbarHostState.showSnackbar("Activa Bluetooth para conectar")
+                return
+            }
 
-        val bonded = adapter.bondedDevices
-        val device: BluetoothDevice? = bonded.firstOrNull { it.name == TARGET_DEVICE_NAME }
+            val bonded = adapter.bondedDevices
+            val device: BluetoothDevice? = bonded.firstOrNull { it.name == TARGET_DEVICE_NAME }
 
-        if (device == null) {
-            status = "No emparejado: $TARGET_DEVICE_NAME"
-            snackbarHostState.showSnackbar("Empareja primero '$TARGET_DEVICE_NAME' en Ajustes > Bluetooth")
-            return
-        }
+            if (device == null) {
+                status = "No emparejado: $TARGET_DEVICE_NAME"
+                snackbarHostState.showSnackbar("Empareja primero '$TARGET_DEVICE_NAME' en Ajustes > Bluetooth")
+                return
+            }
 
-        status = "Conectando a $TARGET_DEVICE_NAME..."
+            status = "Conectando a $TARGET_DEVICE_NAME..."
 
-        withContext(Dispatchers.IO) {
-            try {
-                // cancelar descubrimiento acelera conexión
-                adapter.cancelDiscovery()
+            withContext(Dispatchers.IO) {
+                try {
+                    adapter.cancelDiscovery()
+                    val tmpSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+                    tmpSocket.connect()
 
-                val tmpSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                tmpSocket.connect()
-
-                socket = tmpSocket
-                isConnected = true
-                status = "Conectado a $TARGET_DEVICE_NAME"
-            } catch (e: IOException) {
-                socket = null
-                isConnected = false
-                status = "Error de conexión"
-                withContext(Dispatchers.Main) {
-                    snackbarHostState.showSnackbar("No se pudo conectar: ${e.message ?: "error"}")
+                    socket = tmpSocket
+                    isConnected = true
+                    status = "Conectado a $TARGET_DEVICE_NAME"
+                } catch (e: IOException) {
+                    socket = null
+                    isConnected = false
+                    status = "Error de conexión"
+                    withContext(Dispatchers.Main) {
+                        snackbarHostState.showSnackbar("No se pudo conectar: ${e.message ?: "error"}")
+                    }
                 }
             }
+        } catch (e: Exception) {
+            snackbarHostState.showSnackbar("Error fatal: ${e.message ?: "error"}")
         }
     }
 
@@ -167,8 +155,8 @@ private fun MainScreen(
         withContext(Dispatchers.IO) {
             try {
                 socket?.close()
-            } catch (_: IOException) {
-            } finally {
+            } catch (_: IOException) { }
+            finally {
                 socket = null
                 isConnected = false
                 status = "Desconectado"
@@ -198,13 +186,13 @@ private fun MainScreen(
         }
     }
 
-    // Si el usuario concede permiso, actualizamos el snackbar una vez
     LaunchedEffect(Unit) {
-        if (!hasBtConnectPermission()) {
-            snackbarHostState.showSnackbar("La app necesita permiso Bluetooth para conectar")
+        if (!hasBtPermissions()) {
+            snackbarHostState.showSnackbar("La app necesita permisos Bluetooth para conectar")
         }
     }
 
+    // UI
     Scaffold(
         topBar = {
             TopAppBar(
@@ -239,13 +227,12 @@ private fun MainScreen(
                 ) {
                     Text(if (isConnected) "DESCONECTAR" else "CONECTAR")
                 }
-
                 Button(
                     modifier = Modifier.weight(1f),
                     onClick = {
                         scope.launch {
-                            if (!hasBtConnectPermission()) {
-                                onRequestBtPermission()
+                            if (!hasBtPermissions()) {
+                                onRequestBtPermissions()
                             } else {
                                 snackbarHostState.showSnackbar("Permiso Bluetooth: OK")
                             }
@@ -257,15 +244,12 @@ private fun MainScreen(
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-
             Text(
                 text = "Comandos",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold
             )
-
             Spacer(modifier = Modifier.height(8.dp))
-
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = { scope.launch { sendCommand('A') } }
@@ -277,6 +261,13 @@ private fun MainScreen(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = { scope.launch { sendCommand('B') } }
             ) { Text("APAGAR MOTORES") }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Button(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { scope.launch { sendCommand('R') } }
+            ) { Text("REVERSA") }
 
             Spacer(modifier = Modifier.height(8.dp))
 
